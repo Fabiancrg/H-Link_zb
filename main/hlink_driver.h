@@ -125,6 +125,17 @@ typedef struct {
 #define HLINK_MSG_READ_BUFFER_SIZE  64
 #define HLINK_ASCII_CR              0x0D
 #define HLINK_STATUS_UPDATE_INTERVAL_MS 5000  // Poll status every 5 seconds
+#define MIN_INTERVAL_BETWEEN_REQUESTS 60     // Minimum 60ms between requests
+#define HLINK_TIMEOUT_MS              1000   // Response timeout threshold
+
+/* Response frame status */
+typedef enum {
+    HLINK_FRAME_NOTHING = 0,    // No data received
+    HLINK_FRAME_PARTIAL = 1,    // Partial frame received
+    HLINK_FRAME_OK = 2,         // Valid OK response
+    HLINK_FRAME_NG = 3,         // NG error response
+    HLINK_FRAME_INVALID = 4     // Invalid/corrupted frame
+} hlink_frame_status_t;
 
 /**
  * @brief Initialize H-Link UART driver
@@ -227,6 +238,13 @@ esp_err_t hlink_reset_filter_warning(void);
  * @return ESP_OK on success
  */
 esp_err_t hlink_request_status_update(void);
+
+/**
+ * @brief Read model name from AC unit
+ * 
+ * @return ESP_OK on success
+ */
+esp_err_t hlink_read_model_name(void);
 
 /**
  * @brief Check if H-Link driver is ready

@@ -29,15 +29,23 @@ static void (*s_state_change_callback)(void) = NULL;
 static char s_response_buf[HLINK_MSG_READ_BUFFER_SIZE] = {0};
 static uint8_t s_response_index = 0;
 
+/* Timing tracking */
+static uint32_t s_last_frame_sent_ms = 0;
+static uint32_t s_timeout_counter_started_at_ms = 0;
+static bool s_timeout_counter_active = false;
+
 /* Helper functions */
 static uint16_t calculate_checksum(uint16_t address, const uint8_t *data, size_t data_len);
 static esp_err_t hlink_send_mt_request(uint16_t address);
 static esp_err_t hlink_send_st_request(uint16_t address, const uint8_t *data, size_t data_len);
-static esp_err_t hlink_read_response(char *buf, size_t buf_size, uint32_t timeout_ms);
-static esp_err_t parse_mt_response(const char *response, uint8_t *data, size_t *data_len);
+static hlink_frame_status_t hlink_read_response(char *buf, size_t buf_size, uint32_t timeout_ms);
+static hlink_frame_status_t parse_mt_response(const char *response, uint8_t *data, size_t *data_len);
 static uint16_t parse_hex(const char *str, size_t len);
 static uint16_t hlink_mode_to_raw(hlink_zb_mode_t mode);
 static hlink_zb_mode_t hlink_raw_to_mode(uint16_t raw_mode);
+static bool reached_timeout_threshold(void);
+static bool can_send_next_frame(void);
+static uint32_t millis(void);
 
 /**
  * @brief Calculate H-Link checksum
@@ -55,6 +63,36 @@ static uint16_t calculate_checksum(uint16_t address, const uint8_t *data, size_t
     }
     
     return checksum & 0xFFFF;
+}
+
+/**
+ * @brief Get current time in milliseconds (FreeRTOS tick based)
+ */
+static uint32_t millis(void)
+{
+    return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+/**
+ * @brief Check if timeout threshold has been reached
+ */
+static bool reached_timeout_threshold(void)
+{
+    if (!s_timeout_counter_active) {
+        return false;
+    }
+    return (millis() - s_timeout_counter_started_at_ms) >= HLINK_TIMEOUT_MS;
+}
+
+/**
+ * @brief Check if enough time has passed to send next frame
+ */
+static bool can_send_next_frame(void)
+{
+    if (s_last_frame_sent_ms == 0) {
+        return true;  // First frame can be sent immediately
+    }
+    return (millis() - s_last_frame_sent_ms) >= MIN_INTERVAL_BETWEEN_REQUESTS;
 }
 
 /**
@@ -116,10 +154,15 @@ static hlink_zb_mode_t hlink_raw_to_mode(uint16_t raw_mode)
 }
 
 /**
- * @brief Send MT (read) request
+ * @brief Send MT (read) request with frame timing
  */
 static esp_err_t hlink_send_mt_request(uint16_t address)
 {
+    // Wait for minimum interval between frames
+    while (!can_send_next_frame()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
     char message[32];
     uint16_t checksum = calculate_checksum(address, NULL, 0);
     
@@ -133,14 +176,22 @@ static esp_err_t hlink_send_mt_request(uint16_t address)
         return ESP_FAIL;
     }
     
+    // Update last frame sent timestamp
+    s_last_frame_sent_ms = millis();
+    
     return ESP_OK;
 }
 
 /**
- * @brief Send ST (write) request
+ * @brief Send ST (write) request with frame timing
  */
 static esp_err_t hlink_send_st_request(uint16_t address, const uint8_t *data, size_t data_len)
 {
+    // Wait for minimum interval between frames
+    while (!can_send_next_frame()) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
     char message[128];
     char data_hex[64] = {0};
     
@@ -161,65 +212,121 @@ static esp_err_t hlink_send_st_request(uint16_t address, const uint8_t *data, si
         return ESP_FAIL;
     }
     
+    // Update last frame sent timestamp
+    s_last_frame_sent_ms = millis();
+    
     return ESP_OK;
 }
 
 /**
- * @brief Read response from UART
+ * @brief Read response from UART with enhanced error detection
  */
-static esp_err_t hlink_read_response(char *buf, size_t buf_size, uint32_t timeout_ms)
+static hlink_frame_status_t hlink_read_response(char *buf, size_t buf_size, uint32_t timeout_ms)
 {
     s_response_index = 0;
     memset(s_response_buf, 0, sizeof(s_response_buf));
     
-    uint32_t start_time = xTaskGetTickCount();
-    uint32_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    uint32_t start_time = millis();
+    bool received_any_data = false;
     
-    while ((xTaskGetTickCount() - start_time) < timeout_ticks) {
+    // Start timeout counter if not already active
+    if (!s_timeout_counter_active) {
+        s_timeout_counter_started_at_ms = start_time;
+        s_timeout_counter_active = true;
+    }
+    
+    while ((millis() - start_time) < timeout_ms) {
         uint8_t byte;
         int len = uart_read_bytes(HLINK_UART_NUM, &byte, 1, pdMS_TO_TICKS(50));
         
         if (len > 0) {
+            received_any_data = true;
+            
             if (byte == HLINK_ASCII_CR) {
-                // End of message
+                // End of message - complete frame received
                 s_response_buf[s_response_index] = '\0';
                 strncpy(buf, s_response_buf, buf_size - 1);
                 buf[buf_size - 1] = '\0';
                 ESP_LOGD(TAG, "RX: %s", buf);
-                return ESP_OK;
+                
+                // Reset timeout counter on successful read
+                s_timeout_counter_active = false;
+                
+                // Check if it's an OK or NG response
+                if (strncmp(buf, "OK ", 3) == 0) {
+                    return HLINK_FRAME_OK;
+                } else if (strncmp(buf, "NG ", 3) == 0) {
+                    ESP_LOGW(TAG, "NG response received");
+                    return HLINK_FRAME_NG;
+                } else {
+                    ESP_LOGW(TAG, "Invalid frame format: %s", buf);
+                    return HLINK_FRAME_INVALID;
+                }
             }
             
             if (s_response_index < (HLINK_MSG_READ_BUFFER_SIZE - 1)) {
                 s_response_buf[s_response_index++] = byte;
+            } else {
+                // Buffer overflow - invalid frame
+                ESP_LOGW(TAG, "Response buffer overflow");
+                s_timeout_counter_active = false;
+                return HLINK_FRAME_INVALID;
             }
+        }
+        
+        // Check for timeout threshold
+        if (reached_timeout_threshold()) {
+            ESP_LOGW(TAG, "Communication timeout threshold reached");
+            s_timeout_counter_active = false;
+            if (received_any_data) {
+                return HLINK_FRAME_PARTIAL;
+            }
+            return HLINK_FRAME_NOTHING;
         }
     }
     
-    ESP_LOGW(TAG, "Response timeout");
-    return ESP_ERR_TIMEOUT;
+    // Timeout expired
+    ESP_LOGW(TAG, "Response timeout after %lu ms", timeout_ms);
+    if (received_any_data && s_response_index > 0) {
+        // Partial frame received
+        s_response_buf[s_response_index] = '\0';
+        ESP_LOGW(TAG, "Partial frame: %s", s_response_buf);
+        return HLINK_FRAME_PARTIAL;
+    }
+    
+    return HLINK_FRAME_NOTHING;
 }
 
 /**
- * @brief Parse MT response
+ * @brief Parse MT response with checksum validation
  */
-static esp_err_t parse_mt_response(const char *response, uint8_t *data, size_t *data_len)
+static hlink_frame_status_t parse_mt_response(const char *response, uint8_t *data, size_t *data_len)
 {
     // Expected format: "OK P=XXXX C=YYYY" or "OK P=XXXX,DATA C=YYYY"
     if (strncmp(response, "OK ", 3) != 0) {
-        ESP_LOGW(TAG, "Invalid response: %s", response);
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "Invalid response prefix: %s", response);
+        return HLINK_FRAME_INVALID;
     }
     
-    // Find P= and extract data
+    // Find P= and extract address
     const char *p_pos = strstr(response, "P=");
     if (!p_pos) {
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "Missing P= in response");
+        return HLINK_FRAME_INVALID;
     }
     p_pos += 2; // Skip "P="
+    
+    // Extract address (4 hex digits)
+    char addr_str[5] = {0};
+    strncpy(addr_str, p_pos, 4);
+    uint16_t address = parse_hex(addr_str, 4);
     
     // Check if there's data after the address
     const char *comma_pos = strchr(p_pos, ',');
     const char *space_pos = strchr(p_pos, ' ');
+    
+    uint8_t temp_data[32] = {0};
+    size_t temp_data_len = 0;
     
     if (comma_pos && comma_pos < space_pos) {
         // There's data - parse it
@@ -228,20 +335,45 @@ static esp_err_t parse_mt_response(const char *response, uint8_t *data, size_t *
         size_t hex_len = data_end - data_start;
         
         if (hex_len > 0 && (hex_len % 2) == 0) {
-            *data_len = hex_len / 2;
-            for (size_t i = 0; i < *data_len; i++) {
+            temp_data_len = hex_len / 2;
+            for (size_t i = 0; i < temp_data_len; i++) {
                 char hex_byte[3] = {data_start[i * 2], data_start[i * 2 + 1], '\0'};
-                data[i] = (uint8_t)parse_hex(hex_byte, 2);
+                temp_data[i] = (uint8_t)parse_hex(hex_byte, 2);
             }
-        } else {
-            *data_len = 0;
         }
-    } else {
-        // No data, just address
-        *data_len = 0;
     }
     
-    return ESP_OK;
+    // Extract and validate checksum
+    const char *c_pos = strstr(response, " C=");
+    if (!c_pos) {
+        ESP_LOGW(TAG, "Missing C= in response");
+        return HLINK_FRAME_INVALID;
+    }
+    c_pos += 3; // Skip " C="
+    
+    char checksum_str[5] = {0};
+    strncpy(checksum_str, c_pos, 4);
+    uint16_t received_checksum = parse_hex(checksum_str, 4);
+    
+    // Calculate expected checksum
+    uint16_t expected_checksum = calculate_checksum(address, temp_data, temp_data_len);
+    
+    if (received_checksum != expected_checksum) {
+        ESP_LOGW(TAG, "Checksum mismatch! Expected: 0x%04X, Received: 0x%04X", 
+                 expected_checksum, received_checksum);
+        return HLINK_FRAME_INVALID;
+    }
+    
+    // Checksum valid - copy data to output
+    *data_len = temp_data_len;
+    if (temp_data_len > 0) {
+        memcpy(data, temp_data, temp_data_len);
+    }
+    
+    ESP_LOGD(TAG, "Parsed response: Addr=0x%04X, DataLen=%u, Checksum=0x%04X (valid)", 
+             address, *data_len, received_checksum);
+    
+    return HLINK_FRAME_OK;
 }
 
 /**
@@ -345,11 +477,13 @@ esp_err_t hlink_request_status_update(void)
     char response[HLINK_MSG_READ_BUFFER_SIZE];
     uint8_t data[32];
     size_t data_len;
+    hlink_frame_status_t status;
     
     // Read power state
     if (hlink_send_mt_request(HLINK_FEATURE_POWER_STATE) == ESP_OK) {
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
-            if (parse_mt_response(response, data, &data_len) == ESP_OK && data_len >= 2) {
+        status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
+            if (parse_mt_response(response, data, &data_len) == HLINK_FRAME_OK && data_len >= 2) {
                 uint16_t power = (data[0] << 8) | data[1];
                 s_state.power_on = (power != 0);
             }
@@ -359,8 +493,9 @@ esp_err_t hlink_request_status_update(void)
     
     // Read mode
     if (hlink_send_mt_request(HLINK_FEATURE_MODE) == ESP_OK) {
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
-            if (parse_mt_response(response, data, &data_len) == ESP_OK && data_len >= 2) {
+        status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
+            if (parse_mt_response(response, data, &data_len) == HLINK_FRAME_OK && data_len >= 2) {
                 s_state.hlink_mode = (data[0] << 8) | data[1];
                 s_state.mode = hlink_raw_to_mode(s_state.hlink_mode);
             }
@@ -370,8 +505,9 @@ esp_err_t hlink_request_status_update(void)
     
     // Read current temperature
     if (hlink_send_mt_request(HLINK_FEATURE_CURRENT_INDOOR_TEMP) == ESP_OK) {
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
-            if (parse_mt_response(response, data, &data_len) == ESP_OK && data_len >= 2) {
+        status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
+            if (parse_mt_response(response, data, &data_len) == HLINK_FRAME_OK && data_len >= 2) {
                 uint16_t temp = (data[0] << 8) | data[1];
                 s_state.current_temperature = (float)temp;
             }
@@ -381,8 +517,9 @@ esp_err_t hlink_request_status_update(void)
     
     // Read target temperature
     if (hlink_send_mt_request(HLINK_FEATURE_TARGET_TEMP) == ESP_OK) {
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
-            if (parse_mt_response(response, data, &data_len) == ESP_OK && data_len >= 2) {
+        status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
+            if (parse_mt_response(response, data, &data_len) == HLINK_FRAME_OK && data_len >= 2) {
                 uint16_t temp = (data[0] << 8) | data[1];
                 if (temp >= 16 && temp <= 32) {
                     s_state.target_temperature = (float)temp;
@@ -394,8 +531,9 @@ esp_err_t hlink_request_status_update(void)
     
     // Read fan mode
     if (hlink_send_mt_request(HLINK_FEATURE_FAN_MODE) == ESP_OK) {
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
-            if (parse_mt_response(response, data, &data_len) == ESP_OK && data_len >= 2) {
+        status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
+            if (parse_mt_response(response, data, &data_len) == HLINK_FRAME_OK && data_len >= 2) {
                 uint16_t fan = (data[0] << 8) | data[1];
                 s_state.fan_mode = (hlink_zb_fan_t)(fan & 0xFF);
             }
@@ -405,8 +543,9 @@ esp_err_t hlink_request_status_update(void)
     
     // Read swing mode
     if (hlink_send_mt_request(HLINK_FEATURE_SWING_MODE) == ESP_OK) {
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
-            if (parse_mt_response(response, data, &data_len) == ESP_OK && data_len >= 2) {
+        status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
+            if (parse_mt_response(response, data, &data_len) == HLINK_FRAME_OK && data_len >= 2) {
                 uint16_t swing = (data[0] << 8) | data[1];
                 s_state.swing_mode = swing & 0xFF;
             }
@@ -441,7 +580,8 @@ esp_err_t hlink_set_power(bool power_on)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.power_on = power_on;
         }
     }
@@ -469,7 +609,8 @@ esp_err_t hlink_set_mode(hlink_zb_mode_t mode)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.mode = mode;
             s_state.hlink_mode = raw_mode;
         }
@@ -502,7 +643,8 @@ esp_err_t hlink_set_temperature(float temp_c)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.target_temperature = temp_c;
         }
     }
@@ -529,7 +671,8 @@ esp_err_t hlink_set_fan_mode(hlink_zb_fan_t fan_mode)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.fan_mode = fan_mode;
         }
     }
@@ -560,7 +703,8 @@ esp_err_t hlink_set_swing_mode(uint8_t swing_mode)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.swing_mode = swing_mode;
         }
     }
@@ -587,7 +731,8 @@ esp_err_t hlink_set_remote_lock(bool locked)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.remote_lock = locked;
         }
     }
@@ -641,7 +786,8 @@ esp_err_t hlink_set_leave_home(bool enabled)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.leave_home_enabled = enabled;
         }
     }
@@ -668,13 +814,55 @@ esp_err_t hlink_reset_filter_warning(void)
     
     if (ret == ESP_OK) {
         char response[HLINK_MSG_READ_BUFFER_SIZE];
-        if (hlink_read_response(response, sizeof(response), 500) == ESP_OK) {
+        hlink_frame_status_t status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
             s_state.filter_warning = false;
         }
     }
     
     xSemaphoreGive(s_uart_mutex);
     return ret;
+}
+
+/**
+ * @brief Read model name from AC unit
+ */
+esp_err_t hlink_read_model_name(void)
+{
+    if (!s_initialized) {
+        return ESP_FAIL;
+    }
+    
+    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    
+    char response[HLINK_MSG_READ_BUFFER_SIZE];
+    uint8_t data[32];
+    size_t data_len;
+    hlink_frame_status_t status;
+    
+    // Read model name from feature 0x0900
+    if (hlink_send_mt_request(HLINK_FEATURE_MODEL_NAME) == ESP_OK) {
+        status = hlink_read_response(response, sizeof(response), 500);
+        if (status == HLINK_FRAME_OK) {
+            if (parse_mt_response(response, data, &data_len) == HLINK_FRAME_OK) {
+                // Copy model name data (ASCII string)
+                size_t copy_len = (data_len < sizeof(s_state.model_name) - 1) ? 
+                                  data_len : sizeof(s_state.model_name) - 1;
+                memcpy(s_state.model_name, data, copy_len);
+                s_state.model_name[copy_len] = '\0';
+                
+                ESP_LOGI(TAG, "Model name: %s", s_state.model_name);
+                xSemaphoreGive(s_uart_mutex);
+                return ESP_OK;
+            }
+        }
+    }
+    
+    xSemaphoreGive(s_uart_mutex);
+    ESP_LOGW(TAG, "Failed to read model name");
+    return ESP_FAIL;
 }
 
 /**
