@@ -10,14 +10,29 @@ This project creates a Zigbee router device that bridges H-Link capable Hitachi 
 
 - **ESP32-C6** microcontroller (e.g., XIAO ESP32-C6, ESP32-C6-DevKitC)
 - **H-Link compatible Hitachi HVAC** unit
+- **BSS138 MOSFET level shifters** (for 3.3V to 5V logic level conversion)
 - Connection to H-Link port on the AC unit (typically via SPX-WFG adapter port or direct H-Link connection)
+
+### PCB Design
+
+This project can use the same PCB design as the ACW02-ZB project:
+- **PCB Files**: [ACW02-ZB v1.1 PCB](https://github.com/Fabiancrg/acw02_zb/tree/master/PCB/acw02_zb-v1.1)
+- **Features**: 
+  - Seeedstudio XIAO ESP32-C6 compatible
+  - MPS MP1584 buck converter (12V to 5V/3.3V)
+  - BSS138 level shifter on GPIO1 and GPIO2 to conenct to H-Link port 1 and 2
+  - Compact 53.5mm x 33mm form factor
+
+**Note**: While the PCB includes footprint for TXB0102, using BSS138 MOSFET level shifters is recommended for more reliable UART communication.
 
 ## Pin Configuration
 
 Default UART pins (configurable in `hlink_driver.h`):
-- **TX**: GPIO 20
-- **RX**: GPIO 21
+- **TX**: GPIO 1 (via BSS138 MOSFET level shifter to 5V H-Link)
+- **RX**: GPIO 2 (via BSS138 MOSFET level shifter from 5V H-Link)
 - **GND**: Common ground with AC unit
+
+**Note**: The H-Link port operates at 5V logic levels, so bidirectional level shifters (BSS138) are required to interface with the ESP32-C6's 3.3V logic.
 
 ## Zigbee Endpoints
 
@@ -147,9 +162,11 @@ The device will be automatically recognized as a thermostat once you add support
 
 Edit `main/hlink_driver.h`:
 ```c
-#define HLINK_UART_TX_PIN        GPIO_NUM_20
-#define HLINK_UART_RX_PIN        GPIO_NUM_21
+#define HLINK_UART_TX_PIN        1    // GPIO1 (TX) - via BSS138 level shifter
+#define HLINK_UART_RX_PIN        2    // GPIO2 (RX) - via BSS138 level shifter
 ```
+
+**Important**: BSS138 MOSFET-based level shifters are used instead of TXB0102DCUR because the TXB0102's auto-direction sensing can interfere with UART communication.
 
 ### Status Update Interval
 
@@ -187,6 +204,7 @@ static const char *TAG = "HLINK_DRV";
 - [ESP-Zigbee SDK Documentation](https://docs.espressif.com/projects/esp-zigbee-sdk/)
 - [ESPHome H-Link AC Component](https://github.com/lumixen/esphome-hlink-ac)
 - [Hitachi H-Link Protocol](https://github.com/lumixen/esphome-hlink-ac/blob/main/README.md#h-link-protocol)
+- [ACW02-ZB PCB Design](https://github.com/Fabiancrg/acw02_zb/tree/master/PCB/acw02_zb-v1.1)
 
 ## License
 
@@ -197,5 +215,21 @@ See LICENSE file for details.
 Based on:
 - ESP-Zigbee SDK examples by Espressif
 - ESPHome H-Link AC component by lumixen
-- ACW02 Zigbee project structure
-Zigbee device to control Hitachi HVAC (using Espressif ESP32-C6)
+- ACW02-ZB project for PCB design and hardware reference
+
+---
+
+# ⚠️ Disclaimer
+
+This project is provided **as-is**, without any warranty or guarantee of fitness for a particular purpose. **Use at your own risk.** The authors and contributors are not responsible for any damage, malfunction, injury, or loss resulting from the use, modification, or installation of this hardware or software.
+
+- This is an open-source, community-driven project intended for **educational and experimental use**.
+- The hardware and firmware are **not certified** for commercial or safety-critical applications.
+- **Always follow proper electrical safety procedures** when working with HVAC systems and mains power.
+- Modifying or installing this project **may void your equipment warranty**.
+- Ensure compliance with **local laws and regulations** regarding wireless devices and HVAC modifications.
+- **Improper installation or configuration** may result in equipment damage or safety hazards.
+- Always **disconnect power** before working on HVAC systems.
+- The H-Link protocol implementation is based on **reverse engineering** and may not be complete or accurate for all Hitachi HVAC models.
+
+**By using this project, you acknowledge and accept these terms and assume all risks.**
