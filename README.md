@@ -1,4 +1,15 @@
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Fabiancrg)
+
+
+
+| Supported Targets | ESP32-C6 | ESP32-H2 |
+| ----------------- |  -------- | -------- |
+
 # H-Link Zigbee Bridge for Hitachi HVAC
+
+[![License: GPL v3](https://img.shields.io/badge/Software-GPLv3-blue.svg)](./LICENSE)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/Hardware-CC%20BY--NC--SA%204.0-green.svg)](./LICENSE-hardware)
+
 
 Zigbee bridge for controlling Hitachi HVAC units via H-Link protocol using ESP32-C6.
 
