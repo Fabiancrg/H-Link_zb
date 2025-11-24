@@ -1,0 +1,6 @@
+build/
+.vscode/
+.idea/
+managed_components/
+Doc/
+PCB/lib/
