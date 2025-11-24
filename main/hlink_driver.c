@@ -355,8 +355,12 @@ static hlink_frame_status_t parse_mt_response(const char *response, uint8_t *dat
     strncpy(checksum_str, c_pos, 4);
     uint16_t received_checksum = parse_hex(checksum_str, 4);
     
-    // Calculate expected checksum
-    uint16_t expected_checksum = calculate_checksum(address, temp_data, temp_data_len);
+    // Calculate expected checksum (responses only checksum the P_VALUE data, not the address)
+    uint16_t expected_checksum = 0xFFFF;
+    for (size_t i = 0; i < temp_data_len; i++) {
+        expected_checksum -= temp_data[i];
+    }
+    expected_checksum &= 0xFFFF;
     
     if (received_checksum != expected_checksum) {
         ESP_LOGW(TAG, "Checksum mismatch! Expected: 0x%04X, Received: 0x%04X", 

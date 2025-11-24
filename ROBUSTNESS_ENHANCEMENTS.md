@@ -47,9 +47,16 @@ This document summarizes the improvements made to the H-Link driver to match pro
   - Extract address from response
   - Extract data payload
   - Extract received checksum from `C=YYYY` field
-  - Calculate expected checksum using `calculate_checksum()`
+  - Calculate expected checksum **correctly for responses** (only checksums P_VALUE data, not address)
   - Compare and validate checksums
   - Return `HLINK_FRAME_INVALID` on mismatch
+
+**Important Note:**
+The H-Link protocol uses **different checksum calculations** for requests vs responses:
+- **Request checksum:** `0xFFFF - address_high - address_low - data_bytes`
+- **Response checksum:** `0xFFFF - data_bytes` (address is NOT included)
+
+This is a critical detail discovered from the ESPHome reference implementation.
 
 **Benefits:**
 - Detects corrupted data from electrical noise or transmission errors
