@@ -202,14 +202,6 @@ Edit `main/hlink_driver.h`:
 3. Check power supply (stable 3.3V/5V)
 4. Review Zigbee logs in coordinator
 
-### UART Communication Errors
-
-Enable debug logging in `main/hlink_driver.c`:
-```c
-static const char *TAG = "HLINK_DRV";
-// Check ESP_LOGD output in monitor
-```
-
 ## References
 
 - [ESP-Zigbee SDK Documentation](https://docs.espressif.com/projects/esp-zigbee-sdk/)
