@@ -694,11 +694,6 @@ static void esp_zb_task(void *pvParameters)
     
     esp_zb_on_off_cluster_cfg_t on_off_cfg = {.on_off = false};
     esp_zb_attribute_list_t *swing_onoff = esp_zb_on_off_cluster_create(&on_off_cfg);
-    esp_zb_cluster_add_attr(swing_onoff, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
-                           ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
-                           ESP_ZB_ZCL_ATTR_TYPE_BOOL,
-                           ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
-                           &on_off_cfg.on_off);
     esp_zb_cluster_list_add_on_off_cluster(swing_clusters, swing_onoff, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     
     esp_zb_endpoint_config_t swing_ep = {
@@ -716,11 +711,6 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cluster_list_add_basic_cluster(lock_clusters, esp_zb_basic_cluster_create(&basic_cfg),
                                          ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_attribute_list_t *lock_onoff = esp_zb_on_off_cluster_create(&on_off_cfg);
-    esp_zb_cluster_add_attr(lock_onoff, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
-                           ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
-                           ESP_ZB_ZCL_ATTR_TYPE_BOOL,
-                           ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
-                           &on_off_cfg.on_off);
     esp_zb_cluster_list_add_on_off_cluster(lock_clusters, lock_onoff, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     
     esp_zb_endpoint_config_t lock_ep = {
@@ -738,11 +728,6 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cluster_list_add_basic_cluster(beeper_clusters, esp_zb_basic_cluster_create(&basic_cfg),
                                          ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_attribute_list_t *beeper_onoff = esp_zb_on_off_cluster_create(&on_off_cfg);
-    esp_zb_cluster_add_attr(beeper_onoff, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
-                           ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
-                           ESP_ZB_ZCL_ATTR_TYPE_BOOL,
-                           ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
-                           &on_off_cfg.on_off);
     esp_zb_cluster_list_add_on_off_cluster(beeper_clusters, beeper_onoff, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     
     esp_zb_endpoint_config_t beeper_ep = {
@@ -760,11 +745,6 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_cluster_list_add_basic_cluster(leave_clusters, esp_zb_basic_cluster_create(&basic_cfg),
                                          ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     esp_zb_attribute_list_t *leave_onoff = esp_zb_on_off_cluster_create(&on_off_cfg);
-    esp_zb_cluster_add_attr(leave_onoff, ESP_ZB_ZCL_CLUSTER_ID_ON_OFF,
-                           ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID,
-                           ESP_ZB_ZCL_ATTR_TYPE_BOOL,
-                           ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING,
-                           &on_off_cfg.on_off);
     esp_zb_cluster_list_add_on_off_cluster(leave_clusters, leave_onoff, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     
     esp_zb_endpoint_config_t leave_ep = {
