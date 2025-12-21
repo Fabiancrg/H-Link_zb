@@ -77,19 +77,27 @@ static void boot_button_task(void *pvParameters)
             int64_t now = esp_timer_get_time() / 1000;
             int64_t hold_time = now - button_press_time;
             
+            // Log every second to show button is being held
+            static int64_t last_log_time = 0;
+            if ((hold_time / 1000) > (last_log_time / 1000)) {
+                ESP_LOGI(TAG, "[BUTTON] Holding... %lld seconds", hold_time / 1000);
+                last_log_time = hold_time;
+            }
+            
             if (hold_time >= BUTTON_HOLD_TIME_MS) {
                 ESP_LOGW(TAG, "[BUTTON] *** FACTORY RESET TRIGGERED ***");
                 ESP_LOGW(TAG, "[BUTTON] Erasing Zigbee NVRAM and rebooting...");
                 
-                /* Erase Zigbee NVRAM */
-                esp_zb_nvram_erase_at_start(true);
+                /* Factory reset - erase all Zigbee network data */
+                esp_zb_factory_reset();
                 
-                /* Small delay to ensure log is flushed */
-                vTaskDelay(pdMS_TO_TICKS(100));
-                
-                /* Reboot */
+                /* Should not reach here - esp_zb_factory_reset() reboots device */
+                vTaskDelay(pdMS_TO_TICKS(1000));
                 esp_restart();
             }
+        } else {
+            // Reset button released - clear state
+            button_press_time = 0;
         }
         
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -111,9 +119,14 @@ static esp_err_t button_init(void)
     
     ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "Failed to configure GPIO");
     
-    /* Install ISR service and add handler */
-    ESP_RETURN_ON_ERROR(gpio_install_isr_service(0), TAG, "Failed to install ISR service");
-    ESP_RETURN_ON_ERROR(gpio_isr_handler_add(BOOT_BUTTON_GPIO, boot_button_isr_handler, NULL), 
+    /* Install ISR service and add handler
+     * If ISR service is already installed elsewhere, reuse it instead of failing. */
+    esp_err_t isr_ret = gpio_install_isr_service(0);
+    if (isr_ret != ESP_OK && isr_ret != ESP_ERR_INVALID_STATE) {
+        ESP_RETURN_ON_ERROR(isr_ret, TAG, "Failed to install ISR service");
+    }
+
+    ESP_RETURN_ON_ERROR(gpio_isr_handler_add(BOOT_BUTTON_GPIO, boot_button_isr_handler, NULL),
                        TAG, "Failed to add ISR handler");
     
     /* Create button monitoring task */
@@ -600,7 +613,7 @@ static void esp_zb_task(void *pvParameters)
     uint8_t stack_version = 0x30;  // Stack 3.0
     uint8_t hw_version = 1;
     char model_id[16], manufacturer[16], date_code[16], sw_build[16];
-    fill_zcl_string(model_id, sizeof(model_id), "HLINK-ZB-01");
+    fill_zcl_string(model_id, sizeof(model_id), "HLINK-ZB");
     fill_zcl_string(manufacturer, sizeof(manufacturer), MANUFACTURER_NAME);
     fill_zcl_string(date_code, sizeof(date_code), FW_DATE_CODE);
     fill_zcl_string(sw_build, sizeof(sw_build), FW_VERSION);
