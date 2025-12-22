@@ -253,6 +253,26 @@ esp_err_t hlink_read_model_name(void);
  */
 bool hlink_is_ready(void);
 
+/**
+ * @brief Run H-Link bus diagnostics
+ * 
+ * Monitors the bus for activity, tests UART functionality,
+ * and reports detailed status for troubleshooting.
+ * 
+ * @param duration_sec How many seconds to monitor bus (1-30)
+ */
+void hlink_bus_diagnostics(uint8_t duration_sec);
+
+/**
+ * @brief Probe GPIO pin levels to check physical connection
+ * 
+ * Reads raw GPIO voltage levels on TX and RX pins to help
+ * diagnose wiring and level shifter issues.
+ * 
+ * @param duration_sec How many seconds to probe (1-10)
+ */
+void hlink_probe_gpio_levels(uint8_t duration_sec);
+
 #ifdef __cplusplus
 }
 #endif

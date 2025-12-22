@@ -170,6 +170,14 @@ static esp_err_t deferred_driver_init(void)
     } else {
         ESP_LOGI(TAG, "[OK] H-Link driver initialized successfully");
         
+        /* Run bus diagnostics to verify communication */
+        ESP_LOGI(TAG, "[DIAG] Running H-Link bus diagnostics (5 seconds)...");
+        hlink_bus_diagnostics(5);
+        
+        /* Probe GPIO levels to check physical connection */
+        ESP_LOGI(TAG, "[DIAG] Probing GPIO levels (5 seconds)...");
+        hlink_probe_gpio_levels(5);
+        
         /* Register callback for instant state change notifications */
         ESP_LOGI(TAG, "[INIT] Registering H-Link state change callback...");
         hlink_register_state_change_callback(hlink_state_changed_callback);

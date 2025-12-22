@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "driver/gpio.h"
 #include "string.h"
 #include "stdio.h"
 
@@ -168,13 +169,15 @@ static esp_err_t hlink_send_mt_request(uint16_t address)
     
     snprintf(message, sizeof(message), "MT P=%04X C=%04X\r", address, checksum);
     
+    ESP_LOGI(TAG, "[BUS] TX: %s (length: %d bytes)", message, (int)strlen(message));
     ESP_LOGD(TAG, "TX: %s", message);
     
     int written = uart_write_bytes(HLINK_UART_NUM, message, strlen(message));
     if (written < 0) {
-        ESP_LOGE(TAG, "UART write failed");
+        ESP_LOGE(TAG, "[BUS] UART write failed!");
         return ESP_FAIL;
     }
+    ESP_LOGI(TAG, "[BUS] Successfully wrote %d bytes to UART", written);
     
     // Update last frame sent timestamp
     s_last_frame_sent_ms = millis();
@@ -204,13 +207,15 @@ static esp_err_t hlink_send_st_request(uint16_t address, const uint8_t *data, si
     
     snprintf(message, sizeof(message), "ST P=%04X,%s C=%04X\r", address, data_hex, checksum);
     
+    ESP_LOGI(TAG, "[BUS] TX: %s (length: %d bytes)", message, (int)strlen(message));
     ESP_LOGD(TAG, "TX: %s", message);
     
     int written = uart_write_bytes(HLINK_UART_NUM, message, strlen(message));
     if (written < 0) {
-        ESP_LOGE(TAG, "UART write failed");
+        ESP_LOGE(TAG, "[BUS] UART write failed!");
         return ESP_FAIL;
     }
+    ESP_LOGI(TAG, "[BUS] Successfully wrote %d bytes to UART", written);
     
     // Update last frame sent timestamp
     s_last_frame_sent_ms = millis();
@@ -228,6 +233,7 @@ static hlink_frame_status_t hlink_read_response(char *buf, size_t buf_size, uint
     
     uint32_t start_time = millis();
     bool received_any_data = false;
+    int bytes_received = 0;
     
     // Start timeout counter if not already active
     if (!s_timeout_counter_active) {
@@ -235,18 +241,31 @@ static hlink_frame_status_t hlink_read_response(char *buf, size_t buf_size, uint
         s_timeout_counter_active = true;
     }
     
+    ESP_LOGI(TAG, "[BUS] Waiting for response (timeout: %lu ms)...", timeout_ms);
+    
     while ((millis() - start_time) < timeout_ms) {
         uint8_t byte;
         int len = uart_read_bytes(HLINK_UART_NUM, &byte, 1, pdMS_TO_TICKS(50));
         
         if (len > 0) {
             received_any_data = true;
+            bytes_received++;
+            
+            // Log raw byte (show both hex and ASCII if printable)
+            if (byte >= 0x20 && byte <= 0x7E) {
+                ESP_LOGI(TAG, "[BUS] Byte %d: 0x%02X '%c'", bytes_received, byte, (char)byte);
+            } else if (byte == HLINK_ASCII_CR) {
+                ESP_LOGI(TAG, "[BUS] Byte %d: 0x%02X <CR> (end of frame)", bytes_received, byte);
+            } else {
+                ESP_LOGI(TAG, "[BUS] Byte %d: 0x%02X (non-printable)", bytes_received, byte);
+            }
             
             if (byte == HLINK_ASCII_CR) {
                 // End of message - complete frame received
                 s_response_buf[s_response_index] = '\0';
                 strncpy(buf, s_response_buf, buf_size - 1);
                 buf[buf_size - 1] = '\0';
+                ESP_LOGI(TAG, "[BUS] Complete frame received (%d bytes): %s", bytes_received, buf);
                 ESP_LOGD(TAG, "RX: %s", buf);
                 
                 // Reset timeout counter on successful read
@@ -286,12 +305,16 @@ static hlink_frame_status_t hlink_read_response(char *buf, size_t buf_size, uint
     }
     
     // Timeout expired
-    ESP_LOGW(TAG, "Response timeout after %lu ms", timeout_ms);
-    if (received_any_data && s_response_index > 0) {
-        // Partial frame received
-        s_response_buf[s_response_index] = '\0';
-        ESP_LOGW(TAG, "Partial frame: %s", s_response_buf);
-        return HLINK_FRAME_PARTIAL;
+    if (received_any_data) {
+        ESP_LOGW(TAG, "[BUS] Response timeout after %lu ms (%d bytes received)", timeout_ms, bytes_received);
+        if (s_response_index > 0) {
+            // Partial frame received
+            s_response_buf[s_response_index] = '\0';
+            ESP_LOGW(TAG, "[BUS] Partial frame: %s", s_response_buf);
+            return HLINK_FRAME_PARTIAL;
+        }
+    } else {
+        ESP_LOGW(TAG, "[BUS] No data received on bus after %lu ms - check wiring!", timeout_ms);
     }
     
     return HLINK_FRAME_NOTHING;
@@ -443,6 +466,55 @@ esp_err_t hlink_driver_init(void)
     ESP_LOGI(TAG, "H-Link driver initialized successfully");
     ESP_LOGI(TAG, "  UART: %d, TX: GPIO%d, RX: GPIO%d, Baud: %d, Parity: ODD",
              HLINK_UART_NUM, HLINK_UART_TX_PIN, HLINK_UART_RX_PIN, HLINK_UART_BAUD_RATE);
+    
+    // Perform UART health check
+    ESP_LOGI(TAG, "[BUS] Performing UART health check...");
+    
+    // Check if UART is functional
+    size_t uart_buf_len = 0;
+    uart_get_buffered_data_len(HLINK_UART_NUM, &uart_buf_len);
+    ESP_LOGI(TAG, "[BUS] UART RX buffer status: %d bytes", (int)uart_buf_len);
+    
+    // Flush any existing data
+    if (uart_buf_len > 0) {
+        ESP_LOGW(TAG, "[BUS] Flushing %d bytes from RX buffer", (int)uart_buf_len);
+        uart_flush_input(HLINK_UART_NUM);
+    }
+    
+    // Monitor bus for 2 seconds to see if there's any activity
+    ESP_LOGI(TAG, "[BUS] Monitoring bus for 2 seconds to detect any activity...");
+    uint32_t start = millis();
+    int bytes_seen = 0;
+    bool bus_active = false;
+    
+    while ((millis() - start) < 2000) {
+        uint8_t byte;
+        int len = uart_read_bytes(HLINK_UART_NUM, &byte, 1, pdMS_TO_TICKS(100));
+        if (len > 0) {
+            bytes_seen++;
+            bus_active = true;
+            if (byte >= 0x20 && byte <= 0x7E) {
+                ESP_LOGI(TAG, "[BUS] Detected byte: 0x%02X '%c'", byte, (char)byte);
+            } else {
+                ESP_LOGI(TAG, "[BUS] Detected byte: 0x%02X", byte);
+            }
+        }
+    }
+    
+    if (bus_active) {
+        ESP_LOGI(TAG, "[BUS] Bus is ACTIVE - detected %d bytes in 2 seconds", bytes_seen);
+        ESP_LOGI(TAG, "[BUS] H-Link device appears to be transmitting");
+    } else {
+        ESP_LOGW(TAG, "[BUS] Bus is SILENT - no activity detected in 2 seconds");
+        ESP_LOGW(TAG, "[BUS] Possible issues:");
+        ESP_LOGW(TAG, "[BUS]   1. HVAC unit is not connected");
+        ESP_LOGW(TAG, "[BUS]   2. Wrong TX/RX pin configuration");
+        ESP_LOGW(TAG, "[BUS]   3. Baud rate mismatch (should be 9600)");
+        ESP_LOGW(TAG, "[BUS]   4. Wiring issue (check connections)");
+        ESP_LOGW(TAG, "[BUS]   5. HVAC unit is powered off");
+    }
+    
+    ESP_LOGI(TAG, "[BUS] Health check complete - driver ready");
     
     return ESP_OK;
 }
@@ -870,11 +942,309 @@ esp_err_t hlink_read_model_name(void)
 }
 
 /**
- * @brief Check if driver is ready
+ * @brief Check if driver is initialized and ready
  */
 bool hlink_is_ready(void)
 {
     return s_initialized;
+}
+
+/**
+ * @brief Run comprehensive bus diagnostics
+ */
+void hlink_bus_diagnostics(uint8_t duration_sec)
+{
+    if (duration_sec < 1) duration_sec = 1;
+    if (duration_sec > 30) duration_sec = 30;
+    
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "H-LINK BUS DIAGNOSTICS");
+    ESP_LOGI(TAG, "========================================");
+    
+    // 1. UART Configuration
+    ESP_LOGI(TAG, "[1] UART Configuration:");
+    ESP_LOGI(TAG, "    Port: UART_%d", HLINK_UART_NUM);
+    ESP_LOGI(TAG, "    TX Pin: GPIO%d", HLINK_UART_TX_PIN);
+    ESP_LOGI(TAG, "    RX Pin: GPIO%d", HLINK_UART_RX_PIN);
+    ESP_LOGI(TAG, "    Baud Rate: %d", HLINK_UART_BAUD_RATE);
+    ESP_LOGI(TAG, "    Parity: ODD");
+    ESP_LOGI(TAG, "    Data Bits: 8");
+    ESP_LOGI(TAG, "    Stop Bits: 1");
+    
+    // 2. UART Buffer Status
+    size_t uart_buf_len = 0;
+    uart_get_buffered_data_len(HLINK_UART_NUM, &uart_buf_len);
+    ESP_LOGI(TAG, "[2] UART Buffer Status:");
+    ESP_LOGI(TAG, "    RX buffer: %d bytes", (int)uart_buf_len);
+    
+    if (uart_buf_len > 0) {
+        ESP_LOGW(TAG, "    WARNING: RX buffer not empty! Flushing...");
+        uart_flush_input(HLINK_UART_NUM);
+    }
+    
+    // 3. Bus Activity Monitor
+    ESP_LOGI(TAG, "[3] Bus Activity Monitor:");
+    ESP_LOGI(TAG, "    Monitoring for %d seconds...", duration_sec);
+    
+    uint32_t start = millis();
+    int total_bytes = 0;
+    int printable_chars = 0;
+    int cr_chars = 0;
+    bool saw_mt = false, saw_st = false, saw_ok = false, saw_ng = false;
+    char partial_msg[64] = {0};
+    int partial_idx = 0;
+    
+    while ((millis() - start) < (duration_sec * 1000)) {
+        uint8_t byte;
+        int len = uart_read_bytes(HLINK_UART_NUM, &byte, 1, pdMS_TO_TICKS(100));
+        
+        if (len > 0) {
+            total_bytes++;
+            
+            // Build partial message
+            if (byte == HLINK_ASCII_CR) {
+                partial_msg[partial_idx] = '\0';
+                ESP_LOGI(TAG, "    Frame: %s", partial_msg);
+                partial_idx = 0;
+                cr_chars++;
+            } else if (partial_idx < 63) {
+                partial_msg[partial_idx++] = byte;
+            }
+            
+            // Analyze byte
+            if (byte >= 0x20 && byte <= 0x7E) {
+                printable_chars++;
+                
+                // Check for protocol keywords
+                if (partial_idx >= 2) {
+                    if (partial_msg[partial_idx-2] == 'M' && partial_msg[partial_idx-1] == 'T') saw_mt = true;
+                    if (partial_msg[partial_idx-2] == 'S' && partial_msg[partial_idx-1] == 'T') saw_st = true;
+                    if (partial_msg[partial_idx-2] == 'O' && partial_msg[partial_idx-1] == 'K') saw_ok = true;
+                    if (partial_msg[partial_idx-2] == 'N' && partial_msg[partial_idx-1] == 'G') saw_ng = true;
+                }
+            }
+        }
+    }
+    
+    // 4. Analysis Results
+    ESP_LOGI(TAG, "[4] Analysis Results:");
+    ESP_LOGI(TAG, "    Total bytes received: %d", total_bytes);
+    ESP_LOGI(TAG, "    Printable characters: %d", printable_chars);
+    ESP_LOGI(TAG, "    Frame terminators (CR): %d", cr_chars);
+    ESP_LOGI(TAG, "    Complete frames: ~%d", cr_chars);
+    
+    if (total_bytes == 0) {
+        ESP_LOGE(TAG, "    ❌ NO ACTIVITY DETECTED!");
+        ESP_LOGE(TAG, "    ");
+        ESP_LOGE(TAG, "    Possible causes:");
+        ESP_LOGE(TAG, "    1. HVAC unit is powered OFF");
+        ESP_LOGE(TAG, "    2. H-Link cable not connected");
+        ESP_LOGE(TAG, "    3. Wrong TX/RX pins (check GPIO%d and GPIO%d)", HLINK_UART_TX_PIN, HLINK_UART_RX_PIN);
+        ESP_LOGE(TAG, "    4. Level shifter not working (BSS138/Si2323DS)");
+        ESP_LOGE(TAG, "    5. Wrong UART port (should be UART_%d)", HLINK_UART_NUM);
+        ESP_LOGE(TAG, "    6. Baud rate mismatch (should be 9600)");
+    } else if (printable_chars < (total_bytes / 2)) {
+        ESP_LOGW(TAG, "    ⚠️  Mostly non-printable data - possible issues:");
+        ESP_LOGW(TAG, "    1. Baud rate mismatch");
+        ESP_LOGW(TAG, "    2. Parity setting incorrect");
+        ESP_LOGW(TAG, "    3. Electrical noise on line");
+    } else {
+        ESP_LOGI(TAG, "    ✓ Bus activity detected");
+        
+        if (saw_mt || saw_st) {
+            ESP_LOGI(TAG, "    ✓ Detected MT/ST commands (MASTER present)");
+        }
+        if (saw_ok || saw_ng) {
+            ESP_LOGI(TAG, "    ✓ Detected OK/NG responses (SLAVE responding)");
+        }
+        
+        if (!saw_mt && !saw_st && !saw_ok && !saw_ng) {
+            ESP_LOGW(TAG, "    ⚠️  No H-Link protocol frames detected");
+            ESP_LOGW(TAG, "    Data present but not H-Link format");
+        }
+    }
+    
+    // 5. Recommendations
+    ESP_LOGI(TAG, "[5] Recommendations:");
+    if (total_bytes == 0) {
+        ESP_LOGI(TAG, "    → Check HVAC power and cable connections first");
+        ESP_LOGI(TAG, "    → Verify TX=%d and RX=%d pins are correct", HLINK_UART_TX_PIN, HLINK_UART_RX_PIN);
+        ESP_LOGI(TAG, "    → Test level shifter with multimeter (should see 5V)");
+    } else if (total_bytes > 0 && cr_chars > 0) {
+        ESP_LOGI(TAG, "    ✓ Communication appears functional");
+        ESP_LOGI(TAG, "    → Try sending a test command (power toggle)");
+    } else {
+        ESP_LOGI(TAG, "    → Check baud rate setting (must be 9600)");
+        ESP_LOGI(TAG, "    → Verify parity is set to ODD");
+    }
+    
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "DIAGNOSTICS COMPLETE");
+    ESP_LOGI(TAG, "========================================");
+}
+
+/**
+ * @brief Probe GPIO pin levels to diagnose connection issues
+ */
+void hlink_probe_gpio_levels(uint8_t duration_sec)
+{
+    if (duration_sec < 1) duration_sec = 1;
+    if (duration_sec > 10) duration_sec = 10;
+    
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "GPIO LEVEL PROBE");
+    ESP_LOGI(TAG, "========================================");
+    
+    ESP_LOGI(TAG, "[INFO] Probing GPIO pins for %d seconds...", duration_sec);
+    ESP_LOGI(TAG, "[INFO] This shows raw pin states (HIGH=1, LOW=0)");
+    ESP_LOGI(TAG, "");
+    
+    // Configure RX pin as input to read levels
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << HLINK_UART_RX_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
+    
+    uint32_t start = millis();
+    int high_count = 0;
+    int low_count = 0;
+    int transition_count = 0;
+    int last_level = -1;
+    int samples = 0;
+    int consecutive_high = 0;
+    int consecutive_low = 0;
+    int max_consecutive_high = 0;
+    int max_consecutive_low = 0;
+    
+    ESP_LOGI(TAG, "[PROBE] Starting GPIO%d (RX) level monitoring...", HLINK_UART_RX_PIN);
+    ESP_LOGI(TAG, "[PROBE] Sample every 10ms for %d seconds", duration_sec);
+    ESP_LOGI(TAG, "");
+    
+    while ((millis() - start) < (duration_sec * 1000)) {
+        int level = gpio_get_level(HLINK_UART_RX_PIN);
+        samples++;
+        
+        if (level == 1) {
+            high_count++;
+            consecutive_high++;
+            consecutive_low = 0;
+            if (consecutive_high > max_consecutive_high) {
+                max_consecutive_high = consecutive_high;
+            }
+        } else {
+            low_count++;
+            consecutive_low++;
+            consecutive_high = 0;
+            if (consecutive_low > max_consecutive_low) {
+                max_consecutive_low = consecutive_low;
+            }
+        }
+        
+        // Detect transitions
+        if (last_level >= 0 && level != last_level) {
+            transition_count++;
+            
+            // Log significant transitions (every 10th)
+            if (transition_count % 10 == 0) {
+                ESP_LOGI(TAG, "[PROBE] Transition #%d: %d->%d (at %lu ms)",
+                         transition_count, last_level, level, millis() - start);
+            }
+        }
+        
+        last_level = level;
+        vTaskDelay(pdMS_TO_TICKS(10));  // Sample every 10ms
+    }
+    
+    // Re-initialize UART after probing
+    uart_driver_delete(HLINK_UART_NUM);
+    uart_config_t uart_config = {
+        .baud_rate = HLINK_UART_BAUD_RATE,
+        .data_bits = HLINK_UART_DATA_BITS,
+        .parity = HLINK_UART_PARITY,
+        .stop_bits = HLINK_UART_STOP_BITS,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    uart_param_config(HLINK_UART_NUM, &uart_config);
+    uart_set_pin(HLINK_UART_NUM, HLINK_UART_TX_PIN, HLINK_UART_RX_PIN,
+                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(HLINK_UART_NUM, HLINK_UART_BUF_SIZE, HLINK_UART_BUF_SIZE, 0, NULL, 0);
+    
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "[RESULTS] GPIO Level Analysis:");
+    ESP_LOGI(TAG, "    Total samples: %d", samples);
+    ESP_LOGI(TAG, "    HIGH count: %d (%.1f%%)", high_count, (float)high_count * 100.0f / samples);
+    ESP_LOGI(TAG, "    LOW count: %d (%.1f%%)", low_count, (float)low_count * 100.0f / samples);
+    ESP_LOGI(TAG, "    Transitions: %d", transition_count);
+    ESP_LOGI(TAG, "    Max consecutive HIGH: %d samples (~%d ms)", max_consecutive_high, max_consecutive_high * 10);
+    ESP_LOGI(TAG, "    Max consecutive LOW: %d samples (~%d ms)", max_consecutive_low, max_consecutive_low * 10);
+    ESP_LOGI(TAG, "");
+    
+    // Analyze results
+    if (transition_count == 0) {
+        if (high_count == samples) {
+            ESP_LOGE(TAG, "[RESULT] ❌ Pin stuck at HIGH (3.3V)");
+            ESP_LOGE(TAG, "    Possible causes:");
+            ESP_LOGE(TAG, "    1. Nothing connected (floating with internal pull-up)");
+            ESP_LOGE(TAG, "    2. Level shifter output stuck HIGH");
+            ESP_LOGE(TAG, "    3. H-Link DATA line idle (normal idle state is HIGH)");
+            ESP_LOGW(TAG, "    NOTE: If HVAC is OFF, HIGH is expected!");
+        } else if (low_count == samples) {
+            ESP_LOGE(TAG, "[RESULT] ❌ Pin stuck at LOW (0V)");
+            ESP_LOGE(TAG, "    Possible causes:");
+            ESP_LOGE(TAG, "    1. Short to ground");
+            ESP_LOGE(TAG, "    2. Level shifter not powered");
+            ESP_LOGE(TAG, "    3. Wrong pin connected");
+        }
+    } else if (transition_count < 10) {
+        ESP_LOGW(TAG, "[RESULT] ⚠️  Very few transitions detected");
+        ESP_LOGW(TAG, "    Pin appears mostly static");
+        ESP_LOGW(TAG, "    Possible:");
+        ESP_LOGW(TAG, "    1. HVAC is idle (no communication)");
+        ESP_LOGW(TAG, "    2. Very slow data rate");
+        ESP_LOGW(TAG, "    3. Electrical noise causing occasional glitches");
+    } else if (transition_count > 100) {
+        ESP_LOGI(TAG, "[RESULT] ✓ Active signal detected!");
+        ESP_LOGI(TAG, "    Pin shows %d transitions in %d seconds", transition_count, duration_sec);
+        ESP_LOGI(TAG, "    This indicates:");
+        ESP_LOGI(TAG, "    ✓ Physical connection is working");
+        ESP_LOGI(TAG, "    ✓ Level shifter is passing signals");
+        ESP_LOGI(TAG, "    ✓ H-Link device is transmitting");
+        ESP_LOGW(TAG, "");
+        ESP_LOGW(TAG, "    But UART received no data - possible issues:");
+        ESP_LOGW(TAG, "    1. Wrong baud rate (should be 9600)");
+        ESP_LOGW(TAG, "    2. Wrong parity setting (should be ODD)");
+        ESP_LOGW(TAG, "    3. Inverted signal (level shifter problem)");
+        ESP_LOGW(TAG, "    4. Voltage levels too low for UART detection");
+    } else {
+        ESP_LOGI(TAG, "[RESULT] ⚠️  Some activity detected");
+        ESP_LOGI(TAG, "    %d transitions suggests possible data", transition_count);
+        ESP_LOGI(TAG, "    But activity level seems low for active H-Link");
+    }
+    
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "[RECOMMENDATION] Next steps:");
+    if (transition_count == 0 && high_count == samples) {
+        ESP_LOGI(TAG, "    1. Turn ON the HVAC unit if it's OFF");
+        ESP_LOGI(TAG, "    2. Check if H-Link DATA line is connected");
+        ESP_LOGI(TAG, "    3. Verify level shifter is powered (measure 3.3V and 5V)");
+    } else if (transition_count == 0 && low_count == samples) {
+        ESP_LOGI(TAG, "    1. Check ground connection");
+        ESP_LOGI(TAG, "    2. Verify level shifter power supply");
+        ESP_LOGI(TAG, "    3. Test with multimeter: should see 3-5V on H-Link DATA");
+    } else if (transition_count > 100) {
+        ESP_LOGI(TAG, "    1. Verify baud rate is 9600 (check your HVAC manual)");
+        ESP_LOGI(TAG, "    2. Try different parity: NONE, EVEN, ODD");
+        ESP_LOGI(TAG, "    3. Check if signal is inverted (may need inverting level shifter)");
+    }
+    
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "GPIO PROBE COMPLETE");
+    ESP_LOGI(TAG, "========================================");
 }
 
 /**
