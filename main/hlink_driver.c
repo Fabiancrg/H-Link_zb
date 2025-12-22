@@ -1096,12 +1096,13 @@ void hlink_probe_gpio_levels(uint8_t duration_sec)
     ESP_LOGI(TAG, "========================================");
     
     ESP_LOGI(TAG, "[INFO] Probing GPIO pins for %d seconds...", duration_sec);
+    ESP_LOGI(TAG, "[INFO] Testing both TX (GPIO%d) and RX (GPIO%d) pins", HLINK_UART_TX_PIN, HLINK_UART_RX_PIN);
     ESP_LOGI(TAG, "[INFO] This shows raw pin states (HIGH=1, LOW=0)");
     ESP_LOGI(TAG, "");
     
-    // Configure RX pin as input to read levels
+    // Configure both TX and RX pins as inputs to read levels
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << HLINK_UART_RX_PIN),
+        .pin_bit_mask = (1ULL << HLINK_UART_TX_PIN) | (1ULL << HLINK_UART_RX_PIN),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -1110,52 +1111,96 @@ void hlink_probe_gpio_levels(uint8_t duration_sec)
     gpio_config(&io_conf);
     
     uint32_t start = millis();
-    int high_count = 0;
-    int low_count = 0;
-    int transition_count = 0;
-    int last_level = -1;
-    int samples = 0;
-    int consecutive_high = 0;
-    int consecutive_low = 0;
-    int max_consecutive_high = 0;
-    int max_consecutive_low = 0;
     
-    ESP_LOGI(TAG, "[PROBE] Starting GPIO%d (RX) level monitoring...", HLINK_UART_RX_PIN);
+    // Tracking for TX pin (GPIO1)
+    int tx_high_count = 0;
+    int tx_low_count = 0;
+    int tx_transition_count = 0;
+    int tx_last_level = -1;
+    int tx_consecutive_high = 0;
+    int tx_consecutive_low = 0;
+    int tx_max_consecutive_high = 0;
+    int tx_max_consecutive_low = 0;
+    
+    // Tracking for RX pin (GPIO2)
+    int rx_high_count = 0;
+    int rx_low_count = 0;
+    int rx_transition_count = 0;
+    int rx_last_level = -1;
+    int rx_consecutive_high = 0;
+    int rx_consecutive_low = 0;
+    int rx_max_consecutive_high = 0;
+    int rx_max_consecutive_low = 0;
+    
+    int samples = 0;
+    
+    ESP_LOGI(TAG, "[PROBE] Starting GPIO level monitoring...");
     ESP_LOGI(TAG, "[PROBE] Sample every 10ms for %d seconds", duration_sec);
     ESP_LOGI(TAG, "");
     
     while ((millis() - start) < (duration_sec * 1000)) {
-        int level = gpio_get_level(HLINK_UART_RX_PIN);
+        int tx_level = gpio_get_level(HLINK_UART_TX_PIN);
+        int rx_level = gpio_get_level(HLINK_UART_RX_PIN);
         samples++;
         
-        if (level == 1) {
-            high_count++;
-            consecutive_high++;
-            consecutive_low = 0;
-            if (consecutive_high > max_consecutive_high) {
-                max_consecutive_high = consecutive_high;
+        // Track TX pin
+        if (tx_level == 1) {
+            tx_high_count++;
+            tx_consecutive_high++;
+            tx_consecutive_low = 0;
+            if (tx_consecutive_high > tx_max_consecutive_high) {
+                tx_max_consecutive_high = tx_consecutive_high;
             }
         } else {
-            low_count++;
-            consecutive_low++;
-            consecutive_high = 0;
-            if (consecutive_low > max_consecutive_low) {
-                max_consecutive_low = consecutive_low;
+            tx_low_count++;
+            tx_consecutive_low++;
+            tx_consecutive_high = 0;
+            if (tx_consecutive_low > tx_max_consecutive_low) {
+                tx_max_consecutive_low = tx_consecutive_low;
             }
         }
         
-        // Detect transitions
-        if (last_level >= 0 && level != last_level) {
-            transition_count++;
+        // Track RX pin
+        if (rx_level == 1) {
+            rx_high_count++;
+            rx_consecutive_high++;
+            rx_consecutive_low = 0;
+            if (rx_consecutive_high > rx_max_consecutive_high) {
+                rx_max_consecutive_high = rx_consecutive_high;
+            }
+        } else {
+            rx_low_count++;
+            rx_consecutive_low++;
+            rx_consecutive_high = 0;
+            if (rx_consecutive_low > rx_max_consecutive_low) {
+                rx_max_consecutive_low = rx_consecutive_low;
+            }
+        }
+        
+        // Detect TX transitions
+        if (tx_last_level >= 0 && tx_level != tx_last_level) {
+            tx_transition_count++;
             
-            // Log significant transitions (every 10th)
-            if (transition_count % 10 == 0) {
-                ESP_LOGI(TAG, "[PROBE] Transition #%d: %d->%d (at %lu ms)",
-                         transition_count, last_level, level, millis() - start);
+            // Log significant transitions (every 20th)
+            if (tx_transition_count % 20 == 0) {
+                ESP_LOGI(TAG, "[PROBE] TX transition #%d: %d->%d (at %lu ms)",
+                         tx_transition_count, tx_last_level, tx_level, millis() - start);
             }
         }
         
-        last_level = level;
+        // Detect RX transitions
+        if (rx_last_level >= 0 && rx_level != rx_last_level) {
+            rx_transition_count++;
+            
+            // Log significant transitions (every 20th)
+            if (rx_transition_count % 20 == 0) {
+                ESP_LOGI(TAG, "[PROBE] RX transition #%d: %d->%d (at %lu ms)",
+                         rx_transition_count, rx_last_level, rx_level, millis() - start);
+            }
+        }
+        
+        tx_last_level = tx_level;
+        rx_last_level = rx_level;
         vTaskDelay(pdMS_TO_TICKS(10));  // Sample every 10ms
     }
     
@@ -1175,71 +1220,136 @@ void hlink_probe_gpio_levels(uint8_t duration_sec)
     uart_driver_install(HLINK_UART_NUM, HLINK_UART_BUF_SIZE, HLINK_UART_BUF_SIZE, 0, NULL, 0);
     
     ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "[RESULTS] GPIO Level Analysis:");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "[RESULTS] TX Pin (GPIO%d) Analysis:", HLINK_UART_TX_PIN);
+    ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "    Total samples: %d", samples);
-    ESP_LOGI(TAG, "    HIGH count: %d (%.1f%%)", high_count, (float)high_count * 100.0f / samples);
-    ESP_LOGI(TAG, "    LOW count: %d (%.1f%%)", low_count, (float)low_count * 100.0f / samples);
-    ESP_LOGI(TAG, "    Transitions: %d", transition_count);
-    ESP_LOGI(TAG, "    Max consecutive HIGH: %d samples (~%d ms)", max_consecutive_high, max_consecutive_high * 10);
-    ESP_LOGI(TAG, "    Max consecutive LOW: %d samples (~%d ms)", max_consecutive_low, max_consecutive_low * 10);
-    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "    HIGH count: %d (%.1f%%)", tx_high_count, (float)tx_high_count * 100.0f / samples);
+    ESP_LOGI(TAG, "    LOW count: %d (%.1f%%)", tx_low_count, (float)tx_low_count * 100.0f / samples);
+    ESP_LOGI(TAG, "    Transitions: %d", tx_transition_count);
+    ESP_LOGI(TAG, "    Max consecutive HIGH: %d samples (~%d ms)", tx_max_consecutive_high, tx_max_consecutive_high * 10);
+    ESP_LOGI(TAG, "    Max consecutive LOW: %d samples (~%d ms)", tx_max_consecutive_low, tx_max_consecutive_low * 10);
     
-    // Analyze results
-    if (transition_count == 0) {
-        if (high_count == samples) {
-            ESP_LOGE(TAG, "[RESULT] ❌ Pin stuck at HIGH (3.3V)");
+    // Analyze TX pin results
+    if (tx_transition_count == 0) {
+        if (tx_high_count == samples) {
+            ESP_LOGE(TAG, "    ❌ TX pin stuck at HIGH (3.3V)");
+            ESP_LOGE(TAG, "    → Level shifter may not be working");
+            ESP_LOGE(TAG, "    → Check BSS138/Si2323DS power and connections");
+        } else if (tx_low_count == samples) {
+            ESP_LOGE(TAG, "    ❌ TX pin stuck at LOW (0V)");
+            ESP_LOGE(TAG, "    → Short to ground or level shifter issue");
+        }
+    } else if (tx_transition_count < 10) {
+        ESP_LOGW(TAG, "    ⚠️  Very few TX transitions");
+        ESP_LOGW(TAG, "    → ESP32 not sending data (normal if no commands yet)");
+    } else {
+        ESP_LOGI(TAG, "    ✓ TX pin shows activity (%d transitions)", tx_transition_count);
+        ESP_LOGI(TAG, "    → ESP32 is transmitting data to HVAC");
+    }
+    
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "[RESULTS] RX Pin (GPIO%d) Analysis:", HLINK_UART_RX_PIN);
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "    Total samples: %d", samples);
+    ESP_LOGI(TAG, "    HIGH count: %d (%.1f%%)", rx_high_count, (float)rx_high_count * 100.0f / samples);
+    ESP_LOGI(TAG, "    LOW count: %d (%.1f%%)", rx_low_count, (float)rx_low_count * 100.0f / samples);
+    ESP_LOGI(TAG, "    Transitions: %d", rx_transition_count);
+    ESP_LOGI(TAG, "    Max consecutive HIGH: %d samples (~%d ms)", rx_max_consecutive_high, rx_max_consecutive_high * 10);
+    ESP_LOGI(TAG, "    Max consecutive LOW: %d samples (~%d ms)", rx_max_consecutive_low, rx_max_consecutive_low * 10);
+    
+    // Analyze RX pin results
+    if (rx_transition_count == 0) {
+        if (rx_high_count == samples) {
+            ESP_LOGE(TAG, "    ❌ RX pin stuck at HIGH (3.3V)");
             ESP_LOGE(TAG, "    Possible causes:");
-            ESP_LOGE(TAG, "    1. Nothing connected (floating with internal pull-up)");
-            ESP_LOGE(TAG, "    2. Level shifter output stuck HIGH");
-            ESP_LOGE(TAG, "    3. H-Link DATA line idle (normal idle state is HIGH)");
-            ESP_LOGW(TAG, "    NOTE: If HVAC is OFF, HIGH is expected!");
-        } else if (low_count == samples) {
-            ESP_LOGE(TAG, "[RESULT] ❌ Pin stuck at LOW (0V)");
+            ESP_LOGE(TAG, "    1. HVAC unit is powered OFF (idle state is HIGH)");
+            ESP_LOGE(TAG, "    2. H-Link cable not connected to HVAC");
+            ESP_LOGE(TAG, "    3. Level shifter not passing signals");
+            ESP_LOGW(TAG, "    NOTE: If HVAC is OFF, HIGH is normal!");
+        } else if (rx_low_count == samples) {
+            ESP_LOGE(TAG, "    ❌ RX pin stuck at LOW (0V)");
             ESP_LOGE(TAG, "    Possible causes:");
             ESP_LOGE(TAG, "    1. Short to ground");
-            ESP_LOGE(TAG, "    2. Level shifter not powered");
+            ESP_LOGE(TAG, "    2. Level shifter not powered (check 3.3V and 5V)");
             ESP_LOGE(TAG, "    3. Wrong pin connected");
         }
-    } else if (transition_count < 10) {
-        ESP_LOGW(TAG, "[RESULT] ⚠️  Very few transitions detected");
-        ESP_LOGW(TAG, "    Pin appears mostly static");
-        ESP_LOGW(TAG, "    Possible:");
-        ESP_LOGW(TAG, "    1. HVAC is idle (no communication)");
-        ESP_LOGW(TAG, "    2. Very slow data rate");
-        ESP_LOGW(TAG, "    3. Electrical noise causing occasional glitches");
-    } else if (transition_count > 100) {
-        ESP_LOGI(TAG, "[RESULT] ✓ Active signal detected!");
-        ESP_LOGI(TAG, "    Pin shows %d transitions in %d seconds", transition_count, duration_sec);
-        ESP_LOGI(TAG, "    This indicates:");
-        ESP_LOGI(TAG, "    ✓ Physical connection is working");
-        ESP_LOGI(TAG, "    ✓ Level shifter is passing signals");
-        ESP_LOGI(TAG, "    ✓ H-Link device is transmitting");
+    } else if (rx_transition_count < 10) {
+        ESP_LOGW(TAG, "    ⚠️  Very few RX transitions");
+        ESP_LOGW(TAG, "    → HVAC may be idle (no communication)");
+        ESP_LOGW(TAG, "    → Or very slow data rate");
+    } else if (rx_transition_count > 100) {
+        ESP_LOGI(TAG, "    ✓ Active signal detected! (%d transitions)", rx_transition_count);
+        ESP_LOGI(TAG, "    → Physical connection is working");
+        ESP_LOGI(TAG, "    → Level shifter is passing signals");
+        ESP_LOGI(TAG, "    → HVAC is transmitting on H-Link bus");
+        
+        // If we see activity but UART didn't receive data, configuration issue
         ESP_LOGW(TAG, "");
-        ESP_LOGW(TAG, "    But UART received no data - possible issues:");
-        ESP_LOGW(TAG, "    1. Wrong baud rate (should be 9600)");
-        ESP_LOGW(TAG, "    2. Wrong parity setting (should be ODD)");
-        ESP_LOGW(TAG, "    3. Inverted signal (level shifter problem)");
-        ESP_LOGW(TAG, "    4. Voltage levels too low for UART detection");
+        ESP_LOGW(TAG, "    If UART shows no data, check:");
+        ESP_LOGW(TAG, "    1. Baud rate (should be 9600)");
+        ESP_LOGW(TAG, "    2. Parity setting (should be ODD)");
+        ESP_LOGW(TAG, "    3. Signal may be inverted");
     } else {
-        ESP_LOGI(TAG, "[RESULT] ⚠️  Some activity detected");
-        ESP_LOGI(TAG, "    %d transitions suggests possible data", transition_count);
-        ESP_LOGI(TAG, "    But activity level seems low for active H-Link");
+        ESP_LOGI(TAG, "    ⚠️  Some RX activity detected (%d transitions)", rx_transition_count);
+        ESP_LOGI(TAG, "    → Possible data but activity seems low");
+    }
+    
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "[OVERALL] Level Shifter Status:");
+    ESP_LOGI(TAG, "========================================");
+    
+    // Overall assessment
+    if (tx_transition_count == 0 && rx_transition_count == 0) {
+        if (tx_high_count == samples && rx_high_count == samples) {
+            ESP_LOGW(TAG, "    ⚠️  Both pins at HIGH - Level shifter may be idle");
+            ESP_LOGW(TAG, "    → Turn ON HVAC and try again");
+            ESP_LOGW(TAG, "    → Verify level shifter power (3.3V and 5V)");
+        } else {
+            ESP_LOGE(TAG, "    ❌ Level shifter appears non-functional");
+            ESP_LOGE(TAG, "    → Check BSS138/Si2323DS connections");
+            ESP_LOGE(TAG, "    → Verify 3.3V and 5V power rails");
+            ESP_LOGE(TAG, "    → Test with multimeter");
+        }
+    } else if (rx_transition_count > 50) {
+        ESP_LOGI(TAG, "    ✓ Level shifter appears functional!");
+        ESP_LOGI(TAG, "    → RX side receiving data from HVAC");
+        if (tx_transition_count > 10) {
+            ESP_LOGI(TAG, "    ✓ TX side also transmitting");
+            ESP_LOGI(TAG, "    → Bidirectional communication working");
+        } else {
+            ESP_LOGW(TAG, "    ⚠️  TX side not active yet");
+            ESP_LOGW(TAG, "    → Normal if no commands sent");
+        }
+    } else {
+        ESP_LOGW(TAG, "    ⚠️  Level shifter status unclear");
+        ESP_LOGW(TAG, "    → Limited activity detected");
+        ESP_LOGW(TAG, "    → May need longer test or HVAC interaction");
     }
     
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "[RECOMMENDATION] Next steps:");
-    if (transition_count == 0 && high_count == samples) {
+    if (rx_transition_count == 0 && rx_high_count == samples) {
         ESP_LOGI(TAG, "    1. Turn ON the HVAC unit if it's OFF");
-        ESP_LOGI(TAG, "    2. Check if H-Link DATA line is connected");
-        ESP_LOGI(TAG, "    3. Verify level shifter is powered (measure 3.3V and 5V)");
-    } else if (transition_count == 0 && low_count == samples) {
-        ESP_LOGI(TAG, "    1. Check ground connection");
+        ESP_LOGI(TAG, "    2. Verify H-Link cable is connected to HVAC unit");
+        ESP_LOGI(TAG, "    3. Check level shifter power: 3.3V and 5V rails");
+        ESP_LOGI(TAG, "    4. Measure voltage on H-Link DATA line (should be ~5V)");
+    } else if (rx_transition_count == 0 && rx_low_count == samples) {
+        ESP_LOGI(TAG, "    1. Check ground connection between ESP32 and HVAC");
         ESP_LOGI(TAG, "    2. Verify level shifter power supply");
         ESP_LOGI(TAG, "    3. Test with multimeter: should see 3-5V on H-Link DATA");
-    } else if (transition_count > 100) {
-        ESP_LOGI(TAG, "    1. Verify baud rate is 9600 (check your HVAC manual)");
-        ESP_LOGI(TAG, "    2. Try different parity: NONE, EVEN, ODD");
-        ESP_LOGI(TAG, "    3. Check if signal is inverted (may need inverting level shifter)");
+        ESP_LOGI(TAG, "    4. Check BSS138 or Si2323DS wiring");
+    } else if (rx_transition_count > 100) {
+        ESP_LOGI(TAG, "    ✓ Hardware looks good!");
+        ESP_LOGI(TAG, "    1. Review bus diagnostics output for protocol details");
+        ESP_LOGI(TAG, "    2. Try sending HVAC commands");
+        ESP_LOGI(TAG, "    3. Check baud rate if UART shows no data (should be 9600)");
+    } else {
+        ESP_LOGI(TAG, "    1. Ensure HVAC unit is powered ON and active");
+        ESP_LOGI(TAG, "    2. Try interacting with HVAC (change temperature)");
+        ESP_LOGI(TAG, "    3. Run test again with longer duration");
     }
     
     ESP_LOGI(TAG, "========================================");
